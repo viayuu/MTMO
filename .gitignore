@@ -6,6 +6,10 @@
 # Downloaded datasets, baseline results, and pretrained weights.
 /Routing-MVMoE/data/
 /Routing-MVMoE/pretrained/
+/MTMO/data/
+/MTMO/pretrained/
+/MTMO/results/
+/MTMO/assets/Poster_ICML24.*
 /PMOCO/**/POMO/result/
 *.pkl
 *.pickle
@@ -34,6 +38,7 @@
 
 # Experiment outputs and download logs.
 /downloads/logs/
+/runs/
 **/runs/
 **/outputs/
 **/wandb/

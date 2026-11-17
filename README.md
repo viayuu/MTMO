@@ -2,6 +2,8 @@
 
 MVMoE 与 PMOCO 的研究初始化工作区。两个项目的作者源码按下列提交原样保存；新增的下载工具、来源清单与说明位于仓库根目录和 `downloads/`。
 
+`MTMO/` 是从 `Routing-MVMoE/` 复制的开发副本：先保存未经改动的副本提交，再在该目录实现多目标多任务融合。原始两个项目继续保留供对照。当前方案见 [backbone 设计](docs/MTMO_BACKBONE_PLAN.md)。
+
 | 项目 | 上游来源 | 固定提交 |
 | --- | --- | --- |
 | [Routing-MVMoE](Routing-MVMoE/) | [RoyalSkye/Routing-MVMoE](https://github.com/RoyalSkye/Routing-MVMoE) | `af29e5af0595f94f3ecc3bc46d72df1089a62682` |
