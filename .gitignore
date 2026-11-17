@@ -1,0 +1,62 @@
+# Original Git object databases and temporary upstream checkouts stay local.
+/.upstream-git/
+/.upstream-cache/
+**/.git/
+
+# Downloaded datasets, baseline results, and pretrained weights.
+/Routing-MVMoE/data/
+/Routing-MVMoE/pretrained/
+/PMOCO/**/POMO/result/
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.parquet
+*.arrow
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+
+# Papers, extracted LaTeX assets, and large presentation files.
+*.pdf
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+/papers/*/*_latex_source/
+/Routing-MVMoE/assets/Poster_ICML24.*
+
+# Experiment outputs and download logs.
+/downloads/logs/
+**/runs/
+**/outputs/
+**/wandb/
+**/tensorboard/
+**/lightning_logs/
+*.log
+*.part
+*.tmp
+
+# Python caches and local environments.
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Editor and operating-system files.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

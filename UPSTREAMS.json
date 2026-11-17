@@ -1,0 +1,15 @@
+{
+  "snapshot_date": "2026-11-17",
+  "repositories": [
+    {
+      "directory": "Routing-MVMoE",
+      "url": "https://github.com/RoyalSkye/Routing-MVMoE.git",
+      "commit": "af29e5af0595f94f3ecc3bc46d72df1089a62682"
+    },
+    {
+      "directory": "PMOCO",
+      "url": "https://github.com/Xi-L/PMOCO.git",
+      "commit": "8e734c819b0adaa2851c51ac800df5c5c7d5bbb6"
+    }
+  ]
+}

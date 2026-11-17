@@ -1,0 +1,290 @@
+[
+  {
+    "path": "Routing-MVMoE/data/CVRP/cvrp100_uniform.pkl",
+    "problem": "CVRP",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/CVRP/cvrp200_uniform.pkl",
+    "problem": "CVRP",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/CVRP/cvrp50_uniform.pkl",
+    "problem": "CVRP",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRP/ovrp100_uniform.pkl",
+    "problem": "OVRP",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRP/ovrp200_uniform.pkl",
+    "problem": "OVRP",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRP/ovrp50_uniform.pkl",
+    "problem": "OVRP",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPB/ovrpb100_uniform.pkl",
+    "problem": "OVRPB",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPB/ovrpb200_uniform.pkl",
+    "problem": "OVRPB",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPB/ovrpb50_uniform.pkl",
+    "problem": "OVRPB",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPBL/ovrpbl100_uniform.pkl",
+    "problem": "OVRPBL",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPBL/ovrpbl200_uniform.pkl",
+    "problem": "OVRPBL",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPBL/ovrpbl50_uniform.pkl",
+    "problem": "OVRPBL",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPBLTW/ovrpbltw100_uniform.pkl",
+    "problem": "OVRPBLTW",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPBLTW/ovrpbltw200_uniform.pkl",
+    "problem": "OVRPBLTW",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPBLTW/ovrpbltw50_uniform.pkl",
+    "problem": "OVRPBLTW",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPBTW/ovrpbtw100_uniform.pkl",
+    "problem": "OVRPBTW",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPBTW/ovrpbtw200_uniform.pkl",
+    "problem": "OVRPBTW",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPBTW/ovrpbtw50_uniform.pkl",
+    "problem": "OVRPBTW",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPL/ovrpl100_uniform.pkl",
+    "problem": "OVRPL",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPL/ovrpl200_uniform.pkl",
+    "problem": "OVRPL",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPL/ovrpl50_uniform.pkl",
+    "problem": "OVRPL",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPLTW/ovrpltw100_uniform.pkl",
+    "problem": "OVRPLTW",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPLTW/ovrpltw200_uniform.pkl",
+    "problem": "OVRPLTW",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPLTW/ovrpltw50_uniform.pkl",
+    "problem": "OVRPLTW",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPTW/ovrptw100_uniform.pkl",
+    "problem": "OVRPTW",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPTW/ovrptw200_uniform.pkl",
+    "problem": "OVRPTW",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/OVRPTW/ovrptw50_uniform.pkl",
+    "problem": "OVRPTW",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPB/vrpb100_uniform.pkl",
+    "problem": "VRPB",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPB/vrpb200_uniform.pkl",
+    "problem": "VRPB",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPB/vrpb50_uniform.pkl",
+    "problem": "VRPB",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPBL/vrpbl100_uniform.pkl",
+    "problem": "VRPBL",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPBL/vrpbl200_uniform.pkl",
+    "problem": "VRPBL",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPBL/vrpbl50_uniform.pkl",
+    "problem": "VRPBL",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPBLTW/vrpbltw100_uniform.pkl",
+    "problem": "VRPBLTW",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPBLTW/vrpbltw200_uniform.pkl",
+    "problem": "VRPBLTW",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPBLTW/vrpbltw50_uniform.pkl",
+    "problem": "VRPBLTW",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPBTW/vrpbtw100_uniform.pkl",
+    "problem": "VRPBTW",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPBTW/vrpbtw200_uniform.pkl",
+    "problem": "VRPBTW",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPBTW/vrpbtw50_uniform.pkl",
+    "problem": "VRPBTW",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPL/vrpl100_uniform.pkl",
+    "problem": "VRPL",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPL/vrpl200_uniform.pkl",
+    "problem": "VRPL",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPL/vrpl50_uniform.pkl",
+    "problem": "VRPL",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPLTW/vrpltw100_uniform.pkl",
+    "problem": "VRPLTW",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPLTW/vrpltw200_uniform.pkl",
+    "problem": "VRPLTW",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPLTW/vrpltw50_uniform.pkl",
+    "problem": "VRPLTW",
+    "problem_size": 50,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPTW/vrptw100_uniform.pkl",
+    "problem": "VRPTW",
+    "problem_size": 100,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPTW/vrptw200_uniform.pkl",
+    "problem": "VRPTW",
+    "problem_size": 200,
+    "instances": 1000
+  },
+  {
+    "path": "Routing-MVMoE/data/VRPTW/vrptw50_uniform.pkl",
+    "problem": "VRPTW",
+    "problem_size": 50,
+    "instances": 1000
+  }
+]

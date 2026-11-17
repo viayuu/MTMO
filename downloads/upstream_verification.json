@@ -1,0 +1,27 @@
+{
+  "verified_at": "2026-11-17T15:02:06.715957+00:00",
+  "repositories": [
+    {
+      "project": "Routing-MVMoE",
+      "commit": "af29e5af0595f94f3ecc3bc46d72df1089a62682",
+      "local_original_files_verified": 264,
+      "staged_original_files_verified": 38,
+      "byte_and_mode_match": true
+    },
+    {
+      "project": "PMOCO",
+      "commit": "8e734c819b0adaa2851c51ac800df5c5c7d5bbb6",
+      "local_original_files_verified": 63,
+      "staged_original_files_verified": 50,
+      "byte_and_mode_match": true
+    }
+  ],
+  "initial_download_sha256": {
+    "checked": 433,
+    "passed": 433
+  },
+  "upstream_files_changed": 0,
+  "staged_gitlinks": 0,
+  "staged_file_size_limit_bytes": 5242880,
+  "upstream_git_metadata": ".upstream-git/ (local only)"
+}
