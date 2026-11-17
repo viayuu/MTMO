@@ -1,297 +1,211 @@
-import os, re, time
-from torch.optim import Adam as Optimizer
+import hashlib
+import json
+import time
+from pathlib import Path
 
-import envs
-from utils import *
+import numpy as np
+import torch
+
+from models import MOEModel
+from objectives import MultiObjectiveEnv, route_objectives
+from utils import get_env, seed_everything
+
+
+def nondominated_mask(points):
+    points = np.asarray(points, dtype=np.float64)
+    dominated = (points[None] <= points[:, None]).all(2) & (points[None] < points[:, None]).any(2)
+    return ~dominated.any(1)
+
+
+def hypervolume(points, reference):
+    points = np.asarray(points, dtype=np.float64)
+    reference = np.asarray(reference, dtype=np.float64)
+    points = points[np.isfinite(points).all(1) & (points < reference).all(1)]
+    if not len(points):
+        return 0.0
+    points = points[nondominated_mask(points)]
+    height, volume = reference[1], 0.0
+    for x, y in points[np.argsort(points[:, 0], kind='stable')]:
+        if y < height:
+            volume += (reference[0] - x) * (height - y)
+            height = y
+    return float(volume)
+
+
+def best_candidates(objectives, pref, scales):
+    cost = (objectives / scales * pref).amax(-1)
+    mask = cost == cost.amin(1, keepdim=True)
+    first = objectives[..., 0].masked_fill(~mask, float('inf'))
+    mask = mask & (first == first.amin(1, keepdim=True))
+    return objectives[..., 1].masked_fill(~mask, float('inf')).argmin(1)
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def atomic_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + '.tmp')
+    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+    temp.replace(path)
 
 
 class Tester:
-    def __init__(self, args, env_params, model_params, tester_params):
-
-        # save arguments
-        self.args = args
-        self.env_params = env_params
-        self.model_params = model_params
-        self.tester_params = tester_params
-
-        # ENV, MODEL, & Load checkpoint
-        self.envs = get_env(self.args.problem)  # Env Class
-        self.device = args.device
-        self.checkpoint = torch.load(args.checkpoint, map_location=self.device)
-        self.model_params['problem'] = self.checkpoint['problem']  # training problem of the checkpoint
-        self.model = get_model(self.args.model_type)(**self.model_params)
-        self.fine_tune_model = get_model(self.args.model_type)(**self.model_params)
-        num_param(self.model)
+    def __init__(self, args, **unused):
+        self.args, self.device = args, args.device
+        self.checkpoint = torch.load(args.checkpoint, map_location=self.device, weights_only=False)
+        self.params = dict(self.checkpoint['model_params'])
+        self.params.update(device=self.device, eval_type='argmax')
+        self.scales = torch.as_tensor(self.checkpoint['scales_data']['scales'], device=self.device)
+        self.params['objective_scales'] = self.scales.tolist()
+        self.model = MOEModel(**self.params).to(self.device)
         self.model.load_state_dict(self.checkpoint['model_state_dict'], strict=True)
-        print(">> Checkpoint (Epoch: {}) Loaded!".format(self.checkpoint['epoch']))
-
-        # load dataset
-        if tester_params['test_set_path'] is None or tester_params['test_set_path'].endswith(".pkl"):
-            self.data_dir = "./data"
-        else:
-            # for solving benchmark instances
-            self.path_list = [os.path.join(tester_params['test_set_path'], f) for f in sorted(os.listdir(tester_params['test_set_path']))] \
-                if os.path.isdir(tester_params['test_set_path']) else [tester_params['test_set_path']]
-            assert self.path_list[-1].endswith(".vrp") or self.path_list[-1].endswith(".txt"), "Unsupported file types."
-
-        # utility
-        self.time_estimator = TimeEstimator()
+        self.model.eval()
+        self.model.set_eval_type('argmax')
+        self.preferences = torch.stack((torch.linspace(1, 0, args.preferences, device=self.device),
+                                        torch.linspace(0, 1, args.preferences, device=self.device)), 1)
+        self.output = Path(args.output)
+        self.output.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_hash = file_sha256(args.checkpoint)
+        root = Path(__file__).resolve().parent
+        self.source_hashes = {str(path.relative_to(root)): file_sha256(path)
+                              for path in sorted(root.rglob('*.py'))
+                              if '__pycache__' not in path.parts and 'tests' not in path.parts}
 
     def run(self):
-        for env_class in self.envs:
-            start_time = time.time()
-            if self.tester_params['test_set_path'] is None or self.tester_params['test_set_path'].endswith(".pkl"):
-                compute_gap = not (self.tester_params['test_set_path'] is not None and self.tester_params['test_set_opt_sol_path'] is None)
-                if self.tester_params['fine_tune_epochs'] > 0:
-                    self._test(self.model, env_class, compute_gap=compute_gap)
-                    self._fine_tune(self.model, env_class)
-                else:
-                    self._test(self.model, env_class, compute_gap=compute_gap)
-            else:
-                for path in self.path_list:
-                    if env_class is envs.CVRPEnv:
-                        self._solve_cvrplib(self.model, path, env_class)
-                    elif env_class is envs.VRPTWEnv:
-                        self._solve_cvrptwlib(self.model, path, env_class)
-                    else:
-                        raise NotImplementedError
+        cases = [(n, cls) for n in self.args.problem_sizes for cls in get_env(self.args.problem)]
+        results = []
+        for index, (n, env_class) in enumerate(cases):
+            if index % self.args.num_shards == self.args.shard_index:
+                results.append(self._test_case(n, env_class))
+        atomic_json(self.output / f'summary-shard-{self.args.shard_index}.json', results)
+        return results
 
-            print(">> Evaluation finished within {:.2f}s\n".format(time.time() - start_time))
+    @torch.no_grad()
+    def _test_case(self, n, env_class):
+        base = env_class(problem_size=n, pomo_size=n, device=self.device)
+        name = base.problem
+        data_path = Path(self.args.data_root) / name / f'{name.lower()}{n}_uniform.pkl'
+        data_hash = file_sha256(data_path)
+        result_path = self.output / f'{name}_n{n}.npz'
+        metadata_path = self.output / f'{name}_n{n}.json'
+        if result_path.exists() and metadata_path.exists() and not self.args.overwrite:
+            previous = json.loads(metadata_path.read_text())
+            expected = (self.checkpoint_hash, self.args.test_episodes, self.args.preferences,
+                        self.args.aug_factor, self.args.seed, self.args.audit_routes)
+            actual = (previous['checkpoint_sha256'], previous['instances'], previous['preferences'],
+                      previous['augmentation'], previous['seed'], previous['audit_routes'])
+            if expected != actual or file_sha256(result_path) != previous['result_sha256']:
+                raise ValueError(f'Result configuration/checksum mismatch: {metadata_path}')
+            if previous.get('data_sha256') != data_hash or previous.get('evaluation_sources') != self.source_hashes:
+                raise ValueError(f'Result data/source provenance mismatch: {metadata_path}; use --overwrite intentionally')
+            print(f'Already complete: {name} n={n}', flush=True)
+            return previous
+        seed_everything(self.args.seed + n * 100 + list(get_env('ALL')).index(env_class))
+        data = base.load_dataset(str(data_path), num_samples=self.args.test_episodes)
+        actual_count = data[0].size(0)
+        if actual_count != self.args.test_episodes:
+            raise ValueError(f'Expected {self.args.test_episodes} instances, got {actual_count}: {data_path}')
+        for xy in data[:2]:
+            if not torch.isfinite(xy).all() or (xy < 0).any() or (xy > 1).any():
+                raise ValueError('Geometric HV reference requires unit-square coordinates: ' + str(data_path))
+        k, max_steps = self.args.preferences, 2 * n + 2
+        all_objectives = np.empty((actual_count, k, 2), dtype=np.float32)
+        all_routes = np.zeros((actual_count, k, max_steps), dtype=np.uint16)
+        all_lengths = np.zeros((actual_count, k), dtype=np.int32)
+        started = time.time()
+        for offset in range(0, actual_count, self.args.test_batch_size):
+            count = min(self.args.test_batch_size, actual_count - offset)
+            batch = tuple(x[offset:offset + count] for x in data)
+            for pref_index, pref in enumerate(self.preferences):
+                env = MultiObjectiveEnv(env_class(problem_size=n, pomo_size=n, device=self.device))
+                env.load_problems(count, problems=batch, aug_factor=self.args.aug_factor)
+                reset_state, _, _ = env.reset()
+                self.model.assign(pref)
+                self.model.pre_forward(reset_state)
+                state, reward, done = env.pre_step()
+                steps = 0
+                while not done:
+                    selected, _ = self.model(state)
+                    if not torch.isfinite(state.ninf_mask.gather(2, selected[..., None])).all():
+                        raise RuntimeError(f'Invalid masked action: {name} step={steps}')
+                    state, reward, done = env.step(selected)
+                    steps += 1
+                    if steps > max_steps:
+                        raise RuntimeError(f'Non-terminating rollout: {name}')
+                group = env.pomo_size
+                costs = (-reward).reshape(self.args.aug_factor, count, group, 2)
+                costs = costs.permute(1, 0, 2, 3).reshape(count, -1, 2)
+                selected_index = best_candidates(costs, pref, self.scales)
+                seq = env.selected_node_list.reshape(self.args.aug_factor, count, group, steps)
+                seq = seq.permute(1, 0, 2, 3).reshape(count, -1, steps)
+                route = seq[torch.arange(count, device=self.device), selected_index]
+                chosen = costs[torch.arange(count, device=self.device), selected_index]
+                original_xy = torch.cat((batch[0], batch[1]), 1)
+                canonical = route_objectives(original_xy, route[:, None], name.startswith('O'))[:, 0]
+                torch.testing.assert_close(chosen, canonical, atol=5e-4, rtol=2e-5)
+                all_objectives[offset:offset + count, pref_index] = canonical.cpu().numpy()
+                all_routes[offset:offset + count, pref_index, :steps] = route.cpu().numpy().astype(np.uint16)
+                all_lengths[offset:offset + count, pref_index] = steps
+            print(f'{name} n={n}: {offset + count}/{actual_count}; {time.time()-started:.1f}s', flush=True)
+        if self.args.audit_routes:
+            self._audit(env_class, n, data, all_routes, all_objectives)
+        nondominated = np.stack([nondominated_mask(x) for x in all_objectives])
+        reference = np.array([2 * n * np.sqrt(2) + 1e-5, (n + 1) * np.sqrt(2) + 1e-5])
+        hv = np.array([hypervolume(x, reference) for x in all_objectives])
+        temp = result_path.with_suffix('.tmp.npz')
+        np.savez_compressed(temp, objectives=all_objectives, preferences=self.preferences.cpu().numpy(),
+                            routes=all_routes, route_lengths=all_lengths, nondominated=nondominated,
+                            hypervolume=hv, hv_reference=reference)
+        temp.replace(result_path)
+        summary = dict(problem=name, problem_size=n, instances=actual_count, preferences=k,
+                       augmentation=self.args.aug_factor, seed=self.args.seed,
+                       checkpoint=str(Path(self.args.checkpoint).resolve()), checkpoint_sha256=self.checkpoint_hash,
+                       checkpoint_epoch=self.checkpoint['epoch'], data_path=str(data_path.resolve()),
+                       data_sha256=data_hash, evaluation_sources=self.source_hashes, scales=self.scales.tolist(),
+                       train_tasks=['CVRP', 'OVRP', 'VRPB', 'VRPL', 'VRPTW', 'OVRPTW'],
+                       training_size=self.checkpoint['env_params']['problem_size'],
+                       hypervolume_mean=float(hv.mean()), hypervolume_ratio_mean=float((hv/reference.prod()).mean()),
+                       hv_reference=reference.tolist(), hv_reference_policy='unit_square_geometric_upper_bound',
+                       unique_nondominated_mean=float(np.mean([len(np.unique(x[m], axis=0))
+                                                             for x, m in zip(all_objectives, nondominated)])),
+                       endpoint_total=all_objectives[:, 0].mean(0).tolist(),
+                       endpoint_longest=all_objectives[:, -1].mean(0).tolist(),
+                       audit_routes=self.args.audit_routes, feasible_fraction=1.0,
+                       elapsed_seconds=time.time()-started, result_sha256=file_sha256(result_path))
+        atomic_json(metadata_path, summary)
+        return summary
 
-    def _test(self, model, env_class, compute_gap=False):
-        self.time_estimator.reset()
-        env = env_class(**self.env_params)
-        score_AM, gap_AM = AverageMeter(), AverageMeter()
-        aug_score_AM, aug_gap_AM = AverageMeter(), AverageMeter()
-        scores, aug_scores = torch.zeros(0).to(self.device), torch.zeros(0).to(self.device)
-        episode, test_num_episode = 0, self.tester_params['test_episodes']
-
-        data_path = self.tester_params['test_set_path'] if self.tester_params['test_set_path'] \
-            else os.path.join(self.data_dir, env.problem, "{}{}_uniform.pkl".format(env.problem.lower(), env.problem_size))
-
-        while episode < test_num_episode:
-            remaining = test_num_episode - episode
-            batch_size = min(self.tester_params['test_batch_size'], remaining)
-            data = env.load_dataset(data_path, offset=episode, num_samples=batch_size)
-
-            score, aug_score, all_score, all_aug_score = self._test_one_batch(model, data, env)
-            score_AM.update(score, batch_size)
-            aug_score_AM.update(aug_score, batch_size)
-            scores = torch.cat((scores, all_score), dim=0)
-            aug_scores = torch.cat((aug_scores, all_aug_score), dim=0)
-
-            if compute_gap:
-                opt_sol_path = self.tester_params['test_set_opt_sol_path'] if self.tester_params['test_set_opt_sol_path'] \
-                    else get_opt_sol_path(os.path.join(self.data_dir, env.problem), env.problem, env.problem_size)
-                opt_sol = load_dataset(opt_sol_path, disable_print=True)[episode: episode + batch_size]  # [(obj, route), ...]
-                opt_sol = [i[0] for i in opt_sol]
-                gap = [(all_score[i].item() - opt_sol[i]) / opt_sol[i] * 100 for i in range(batch_size)]
-                aug_gap = [(all_aug_score[i].item() - opt_sol[i]) / opt_sol[i] * 100 for i in range(batch_size)]
-                gap_AM.update(sum(gap)/batch_size, batch_size)
-                aug_gap_AM.update(sum(aug_gap)/batch_size, batch_size)
-
-            episode += batch_size
-
-            elapsed_time_str, remain_time_str = self.time_estimator.get_est_string(episode, test_num_episode)
-            print("episode {:3d}/{:3d}, Elapsed[{}], Remain[{}], score:{:.3f}, aug_score:{:.3f}".format(
-                episode, test_num_episode, elapsed_time_str, remain_time_str, score, aug_score))
-
-            all_done = (episode == test_num_episode)
-
-            if all_done:
-                print(" \n*** Test Done on {} *** ".format(env.problem))
-                print(" NO-AUG SCORE: {:.4f}, Gap: {:.4f} ".format(score_AM.avg, gap_AM.avg))
-                print(" AUGMENTATION SCORE: {:.4f}, Gap: {:.4f} ".format(aug_score_AM.avg, aug_gap_AM.avg))
-                print("{:.3f} ({:.3f}%)".format(score_AM.avg, gap_AM.avg))
-                print("{:.3f} ({:.3f}%)".format(aug_score_AM.avg, aug_gap_AM.avg))
-
-        return scores, aug_scores
-
-    def _test_one_batch(self, model, test_data, env):
-        aug_factor = self.tester_params['aug_factor']
-        batch_size = test_data.size(0) if isinstance(test_data, torch.Tensor) else test_data[-1].size(0)
-        sample_size = self.tester_params['sample_size'] if self.model_params['eval_type'] == "softmax" else 1
-
-        # Sampling: augment data based on sample_size: [batch_size, ...] -> [batch_size x sample_size, ...]
-        if self.model_params['eval_type'] == "softmax":
-            test_data = list(test_data)
-            for i, data in enumerate(test_data):
-                if data.dim() == 1:
-                    test_data[i] = data.repeat(sample_size)
-                elif data.dim() == 2:
-                    test_data[i] = data.repeat(sample_size, 1)
-                elif data.dim() == 3:
-                    test_data[i] = data.repeat(sample_size, 1, 1)
-
-        # Ready
-        model.eval()
-        with torch.no_grad():
-            env.load_problems(batch_size, problems=test_data, aug_factor=aug_factor)
-            reset_state, _, _ = env.reset()
-            model.pre_forward(reset_state)
-
-        # POMO Rollout
-        state, reward, done = env.pre_step()
-        while not done:
-            selected, _ = model(state)
-            # shape: (batch, pomo)
-            state, reward, done = env.step(selected)
-
-        # Return
-        aug_reward = reward.reshape(aug_factor * sample_size, batch_size, env.pomo_size)
-        # shape: (augmentation, batch, pomo)
-        max_pomo_reward, _ = aug_reward.max(dim=2)  # get best results from pomo
-        # shape: (augmentation, batch)
-        no_aug_score = -max_pomo_reward[0, :].float()  # negative sign to make positive value
-        no_aug_score_mean = no_aug_score.mean()
-
-        max_aug_pomo_reward, _ = max_pomo_reward.max(dim=0)  # get best results from augmentation
-        # shape: (batch,)
-        aug_score = -max_aug_pomo_reward.float()  # negative sign to make positive value
-        aug_score_mean = aug_score.mean()
-
-        return no_aug_score_mean.item(), aug_score_mean.item(), no_aug_score, aug_score
-
-    def _fine_tune(self, model, env_class):
-        self.fine_tune_model.load_state_dict(model.state_dict(), strict=True)
-        optimizer = Optimizer(self.fine_tune_model.parameters(), lr=self.tester_params['lr'], weight_decay=self.tester_params['weight_decay'])
-        # optimizer.load_state_dict(self.checkpoint['optimizer_state_dict'])
-        env = env_class(**self.env_params)
-        fine_tune_episode = self.tester_params['fine_tune_episodes']
-
-        for i in range(self.tester_params['fine_tune_epochs']):
-            episode = 0
-            while episode < fine_tune_episode:
-                remaining = fine_tune_episode - episode
-                batch_size = min(self.tester_params['fine_tune_batch_size'], remaining)
-                data = env.get_random_problems(batch_size, self.env_params["problem_size"])
-                self._fine_tune_one_batch(self.fine_tune_model, data, env, optimizer)
-                episode += batch_size
-
-            print("\n>> Fine-Tuning Epoch {} Finished. Staring Evaluation ...".format(i + 1))
-            self._test(self.fine_tune_model, env_class, compute_gap=True)
-
-    def _fine_tune_one_batch(self, model, data, env, optimizer):
-        model.train()
-        model.set_eval_type(self.model_params["eval_type"])
-        aug_factor = self.tester_params['fine_tune_aug_factor']
-        batch_size = data.size(0) * aug_factor if isinstance(data, torch.Tensor) else data[-1].size(0) * aug_factor
-        env.load_problems(batch_size, problems=data, aug_factor=aug_factor)
-        reset_state, _, _ = env.reset()
-        model.pre_forward(reset_state)
-        prob_list = torch.zeros(size=(batch_size, env.pomo_size, 0))
-        # shape: (batch, pomo, 0~problem)
-
-        # POMO Rollout
-        state, reward, done = env.pre_step()
-        while not done:
-            selected, prob = model(state)
-            # shape: (batch, pomo)
-            state, reward, done = env.step(selected)
-            prob_list = torch.cat((prob_list, prob[:, :, None]), dim=2)
-
-        # Loss
-        advantage = reward - reward.float().mean(dim=1, keepdims=True)  # (batch, pomo)
-        log_prob = prob_list.log().sum(dim=2)
-        loss = -advantage * log_prob  # Minus Sign: To Increase REWARD
-        loss_mean = loss.mean()
-
-        if hasattr(model, "aux_loss"):
-            loss_mean = loss_mean + model.aux_loss  # add aux(moe)_loss for load balancing (default coefficient: 1e-2)
-
-        # Step & Return
-        model.zero_grad()
-        loss_mean.backward()
-        optimizer.step()
-
-    def _solve_cvrplib(self, model, path, env_class):
-        """
-            Solving one instance with CVRPLIB format.
-        """
-        file = open(path, "r")
-        lines = [ll.strip() for ll in file]
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            if line.startswith("DIMENSION"):
-                dimension = int(line.split(':')[1])
-            elif line.startswith("CAPACITY"):
-                capacity = int(line.split(':')[1])
-            elif line.startswith('NODE_COORD_SECTION'):
-                locations = np.loadtxt(lines[i + 1:i + 1 + dimension], dtype=int)
-                i = i + dimension
-            elif line.startswith('DEMAND_SECTION'):
-                demand = np.loadtxt(lines[i + 1:i + 1 + dimension], dtype=int)
-                i = i + dimension
-            i += 1
-        original_locations = locations[:, 1:]
-        original_locations = np.expand_dims(original_locations, axis=0)  # [1, n+1, 2]
-        loc_scaler = 1000
-        assert original_locations.max() <= loc_scaler, ">> Scaler is too small"
-        locations = original_locations / loc_scaler  # [1, n+1, 2]: Scale location coordinates to [0, 1]
-        depot_xy, node_xy = torch.Tensor(locations[:, :1, :]), torch.Tensor(locations[:, 1:, :])
-        node_demand = torch.Tensor(demand[1:, 1:].reshape((1, -1))) / capacity  # [1, n]
-
-        env_params = {'problem_size': node_xy.size(1), 'pomo_size': node_xy.size(1), 'loc_scaler': loc_scaler, 'device': self.device}
-        env = env_class(**env_params)
-        data = (depot_xy, node_xy, node_demand)
-        _, _, no_aug_score, aug_score = self._test_one_batch(model, data, env)
-        no_aug_score = torch.round(no_aug_score * loc_scaler).long()
-        aug_score = torch.round(aug_score * loc_scaler).long()
-        print(">> Finish solving {} -> no_aug: {} aug: {}".format(path, no_aug_score, aug_score))
-
-        return no_aug_score, aug_score
-
-    def _solve_cvrptwlib(self, model, path, env_class):
-        """
-            Solving one instance with VRPTW benchmark (e.g., Solomon) format.
-        """
-        file = open(path, "r")
-        lines = [ll.strip() for ll in file]
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            if line.startswith("NUMBER"):
-                line = lines[i+1]
-                vehicle_number = int(line.split(' ')[0])  # TODO: check vehicle number constraint
-                capacity = int(line.split(' ')[-1])
-            elif line.startswith("CUST NO."):
-                data = np.loadtxt(lines[i + 1:], dtype=int)
-                break
-            i += 1
-        original_locations = data[:, 1:3]
-        original_locations = np.expand_dims(original_locations, axis=0)  # [1, n+1, 2]
-        scaler = max(original_locations.max(), data[0, 5] / 3.)  # we set the time window of the depot node as [0, 3]
-        # scaler = 1000
-        assert original_locations.max() <= scaler, ">> Scaler is too small for {}".format(path)
-        locations = original_locations / scaler  # [1, n+1, 2]: Scale location coordinates to [0, 1]
-        depot_xy, node_xy = torch.Tensor(locations[:, :1, :]), torch.Tensor(locations[:, 1:, :])
-        node_demand = torch.Tensor(data[1:, 3].reshape((1, -1))) / capacity  # [1, n]
-        service_time = torch.Tensor(data[1:, -1].reshape((1, -1))) / scaler  # [1, n]
-        tw_start = torch.Tensor(data[1:, 4].reshape((1, -1))) / scaler  # [1, n]
-        tw_end = torch.Tensor(data[1:, 5].reshape((1, -1))) / scaler  # [1, n]
-
-        env_params = {'problem_size': node_xy.size(1), 'pomo_size': node_xy.size(1), 'loc_scaler': scaler, 'device': self.device}
-        env = env_class(**env_params)
-        env.depot_end = data[0, 5] / scaler
-        data = (depot_xy, node_xy, node_demand, service_time, tw_start, tw_end)
-        _, _, no_aug_score, aug_score = self._test_one_batch(model, data, env)
-
-        # Check distance
-        original_locations = torch.Tensor(original_locations)
-        depot_xy = env.augment_xy_data_by_8_fold(original_locations[:, :1, :])
-        node_xy = env.augment_xy_data_by_8_fold(original_locations[:, 1:, :])
-        original_locations = torch.cat((depot_xy, node_xy), dim=1)
-        gathering_index = env.selected_node_list[:, :, :, None].expand(-1, -1, -1, 2)
-        all_xy = original_locations[:, None, :, :].expand(-1, env_params["pomo_size"], -1, -1)
-        ordered_seq = all_xy.gather(dim=2, index=gathering_index)
-        rolled_seq = ordered_seq.roll(dims=2, shifts=-1)
-        segment_lengths = ((ordered_seq - rolled_seq) ** 2).sum(3).sqrt()
-        travel_distances = segment_lengths.sum(2)
-        # print(travel_distances.min())
-
-        no_aug_score = torch.round(no_aug_score * scaler).long()
-        aug_score = torch.round(aug_score * scaler).long()
-        print(">> Finish solving {} -> no_aug: {} aug: {} real: {}".format(path, no_aug_score, aug_score, travel_distances.min()))
-
-        return no_aug_score, aug_score
+    @torch.no_grad()
+    def _audit(self, env_class, n, data, routes, expected):
+        flat_routes, flat_expected = routes.reshape(-1, routes.shape[-1]), expected.reshape(-1, 2)
+        for offset in range(0, len(flat_routes), self.args.audit_batch_size):
+            count = min(self.args.audit_batch_size, len(flat_routes) - offset)
+            indices = torch.arange(offset, offset + count, device=self.device) // self.args.preferences
+            batch = tuple(x[indices] for x in data)
+            env = MultiObjectiveEnv(env_class(problem_size=n, pomo_size=1, device=self.device))
+            env.load_problems(count, problems=batch, aug_factor=1)
+            env.reset()
+            state, reward, done = env.pre_step()
+            route = torch.as_tensor(flat_routes[offset:offset + count].astype(np.int64), device=self.device)
+            counts = torch.zeros(count, n + 1, device=self.device, dtype=torch.long)
+            counts.scatter_add_(1, route, torch.ones_like(route))
+            if not (counts[:, 1:] == 1).all():
+                raise RuntimeError(f'Customer visit audit failed: {env.problem}')
+            for step in range(route.size(1)):
+                selected = route[:, step:step+1]
+                if not torch.isfinite(state.ninf_mask.gather(2, selected[..., None])).all():
+                    raise RuntimeError(f'Route replay mask violation: {env.problem} step={step}')
+                state, reward, done = env.step(selected)
+                if done:
+                    break
+            if not done:
+                raise RuntimeError(f'Route replay did not finish: {env.problem}')
+            target = torch.as_tensor(flat_expected[offset:offset + count], device=self.device)
+            torch.testing.assert_close((-reward)[:, 0], target, atol=5e-4, rtol=2e-5)

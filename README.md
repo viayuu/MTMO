@@ -34,3 +34,7 @@ python downloads/download_papers.py | tee downloads/logs/papers.log
 MVMoE 官方仓库包含 48 个合成数据集、83 个基线结果文件、CVRPLIB/Solomon 实例和 9 个预训练模型。PMOCO 包含 12 个预训练模型；训练和测试实例由作者的 `get_random_problems` 在线生成，仓库没有独立静态数据包。
 
 原项目的使用和引用方式见各自的 README；原始 MIT 许可证分别保存在 [Routing-MVMoE/LICENSE](Routing-MVMoE/LICENSE) 与 [PMOCO/LICENSE](PMOCO/LICENSE)。
+
+## MTMO backbone execution
+
+Implementation and validation: [run protocol](docs/IMPLEMENTATION_AND_RUN.md). Full-budget configuration: [full_n100.json](configs/full_n100.json). Launch with `python scripts/supervise_mtmo.py`; inspect progress using `python scripts/mtmo_status.py`. Large run artifacts stay local under ignored `runs/`.

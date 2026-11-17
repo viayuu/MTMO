@@ -130,3 +130,7 @@ year        ={2024}
 * [ICML 2024 Review](https://github.com/RoyalSkye/Routing-MVMoE/blob/main/assets/Reviews_ICML24.md)
 * https://github.com/yd-kwon/POMO
 * https://github.com/davidmrau/mixture-of-experts
+
+## MTMO development copy
+
+This directory was copied unchanged and committed before adaptation (baseline cbd9a1c). The conditional MoE backbone, objectives, calibration, distributed trainer, and evaluator are implemented here. See [implementation and run protocol](../docs/IMPLEMENTATION_AND_RUN.md) and [current design](../docs/MTMO_BACKBONE_PLAN.md). Original author repositories remain in the parent workspace for comparison.

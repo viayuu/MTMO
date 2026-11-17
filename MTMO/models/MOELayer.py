@@ -11,6 +11,7 @@
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions.normal import Normal
 import numpy as np
 
@@ -167,7 +168,7 @@ class MoE(nn.Module):
         routing_method: string - ["input_choice", "expert_choice", "soft_moe"]
     """
 
-    def __init__(self, input_size, output_size, num_experts, hidden_size=None, k=1, T=1.0, noisy_gating=True, routing_level="node", routing_method="input_choice", moe_model="MLP"):
+    def __init__(self, input_size, output_size, num_experts, hidden_size=None, k=1, T=1.0, noisy_gating=True, routing_level="node", routing_method="input_choice", moe_model="MLP", external_parameters=False):
         super(MoE, self).__init__()
         self.noisy_gating = noisy_gating
         self.routing_level = routing_level
@@ -178,12 +179,16 @@ class MoE(nn.Module):
         self.hidden_size = hidden_size
         self.k = k
         self.T = T
+        self.external_parameters = external_parameters
+        if external_parameters and moe_model != "Linear":
+            raise ValueError("External expert parameters are only supported for Linear experts")
 
         # instantiate experts and gating/routing network
         if moe_model == "MLP":
             self.experts = nn.ModuleList([MLP(self.input_size, self.output_size, self.hidden_size) for _ in range(self.num_experts)])
         elif moe_model == "Linear":
-            self.experts = nn.ModuleList([nn.Linear(self.input_size, self.output_size) for _ in range(self.num_experts)])
+            self.experts = nn.ModuleList([] if external_parameters else
+                                         [nn.Linear(self.input_size, self.output_size) for _ in range(self.num_experts)])
         else:
             raise NotImplementedError
 
@@ -347,7 +352,14 @@ class MoE(nn.Module):
 
         return G, I, P
 
-    def forward(self, x, loss_coef=1e-3, prob_emb=None):
+    def _expert_forward(self, expert_id, x, expert_weights, expert_biases):
+        if self.external_parameters:
+            if expert_weights is None or expert_biases is None:
+                raise ValueError("Conditional Linear experts require generated weights and biases")
+            return F.linear(x, expert_weights[expert_id], expert_biases[expert_id])
+        return self.experts[expert_id](x)
+
+    def forward(self, x, loss_coef=1e-3, prob_emb=None, expert_weights=None, expert_biases=None):
         """
             Args:
             x: tensor shape [batch_size, problem, input_size]
@@ -380,7 +392,7 @@ class MoE(nn.Module):
                 gates = torch.Tensor([1./self.k for _ in range(self.k)])
             expert_outputs = []
             for i in expert_ids.tolist():
-                expert_outputs.append(self.experts[i](x).unsqueeze(0))
+                expert_outputs.append(self._expert_forward(i, x, expert_weights, expert_biases).unsqueeze(0))
             expert_outputs = torch.cat(expert_outputs, 0)  # [k, batch_size, -1, output_size]
             y = (expert_outputs * gates.reshape(-1, 1, 1, 1)).sum(0)  # [batch_size, -1, output_size]
             return y, 0
@@ -402,7 +414,7 @@ class MoE(nn.Module):
                 dispatcher = SparseDispatcher(self.num_experts, gates, routing_level=self.routing_level)
                 expert_inputs = dispatcher.dispatch(x)
                 # gates = dispatcher.expert_to_gates()
-                expert_outputs = [self.experts[i](expert_inputs[i]) for i in range(self.num_experts)]  # [(batch_size*, num_experts), ...]
+                expert_outputs = [self._expert_forward(i, expert_inputs[i], expert_weights, expert_biases) for i in range(self.num_experts)]  # [(batch_size*, num_experts), ...]
                 y = dispatcher.combine(expert_outputs)
                 # an example of loss scales: reinforce_loss: tensor(-9.3630) aug_loss: tensor(0.0001)
                 return y.reshape(output_shape), loss
@@ -419,7 +431,7 @@ class MoE(nn.Module):
                 G, I, P = self.expert_gating(x, k)  # [num_experts, topk]
                 expert_inputs = P.float() @ x.reshape(P.size(-1), -1)  # [num_experts, topk, -1]
                 expert_inputs = expert_inputs.reshape(expert_inputs_shape)  # [num_experts, topk, ..., input_size]
-                expert_outputs = [self.experts[i](expert_inputs[i]) for i in range(self.num_experts)]
+                expert_outputs = [self._expert_forward(i, expert_inputs[i], expert_weights, expert_biases) for i in range(self.num_experts)]
                 expert_outputs = torch.stack(expert_outputs, 0)  # [num_experts, topk, ..., output_size]
                 output = torch.einsum('ijl,ij,ijd->ld', P, G, expert_outputs.reshape(self.num_experts, k, -1))
                 return output.reshape(output_shape), 0
@@ -433,7 +445,7 @@ class MoE(nn.Module):
                 expert_inputs_shape = [logits.size(-1)] + list(x.size()[1:])
                 expert_inputs = torch.softmax(logits, dim=0).T @ x.reshape(logits.size(0), -1)  # [num_experts * topk, -1]
                 expert_inputs = expert_inputs.reshape(expert_inputs_shape)
-                expert_outputs = [self.experts[i](expert_inputs[i*self.k: (i+1)*self.k]) for i in range(self.num_experts)]
+                expert_outputs = [self._expert_forward(i, expert_inputs[i*self.k: (i+1)*self.k], expert_weights, expert_biases) for i in range(self.num_experts)]
                 expert_outputs = torch.stack(expert_outputs, 0).reshape(self.num_experts * self.k, -1)  # [num_experts, topk, ..., output_size] -> [num_experts * topk, -1]
                 output = torch.softmax(logits, dim=-1) @ expert_outputs  # [batch_size, -1]
                 return output.reshape(output_shape), 0
@@ -446,7 +458,7 @@ class MoE(nn.Module):
                 gates = zeros.scatter(-1, random_indices, 1./self.k)
                 dispatcher = SparseDispatcher(self.num_experts, gates, routing_level=self.routing_level)
                 expert_inputs = dispatcher.dispatch(x)
-                expert_outputs = [self.experts[i](expert_inputs[i]) for i in range(self.num_experts)]  # [(batch_size*, num_experts), ...]
+                expert_outputs = [self._expert_forward(i, expert_inputs[i], expert_weights, expert_biases) for i in range(self.num_experts)]  # [(batch_size*, num_experts), ...]
                 y = dispatcher.combine(expert_outputs)
                 return y.reshape(output_shape), 0
             else:

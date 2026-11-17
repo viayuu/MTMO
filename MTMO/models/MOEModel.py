@@ -23,7 +23,23 @@ class MOEModel(nn.Module):
         self.encoder = MTL_Encoder(**model_params)
         self.decoder = MTL_Decoder(**model_params)
         self.encoded_nodes = None  # shape: (batch, problem+1, EMBEDDING_DIM)
-        self.device = torch.device('cuda', torch.cuda.current_device()) if 'device' not in model_params.keys() else model_params['device']
+        device = model_params.get('device')
+        if device is None:
+            device = torch.device('cuda', torch.cuda.current_device()) if torch.cuda.is_available() else 'cpu'
+        self.device = torch.device(device)
+        scales = torch.as_tensor(model_params.get('objective_scales', [1., 1.]), dtype=torch.float32)
+        if scales.shape != (2,) or not torch.isfinite(scales).all() or not (scales > 0).all():
+            raise ValueError("objective_scales must contain two finite positive values")
+        self.register_buffer('objective_scales', scales.clone())
+
+    def set_objective_scales(self, scales):
+        scales = torch.as_tensor(scales, device=self.objective_scales.device, dtype=self.objective_scales.dtype)
+        if scales.shape != (2,) or not torch.isfinite(scales).all() or not (scales > 0).all():
+            raise ValueError("objective_scales must contain two finite positive values")
+        self.objective_scales.copy_(scales)
+
+    def assign(self, pref):
+        self.decoder.assign(pref)
 
     def pre_forward(self, reset_state):
         depot_xy = reset_state.depot_xy
@@ -52,8 +68,8 @@ class MOEModel(nn.Module):
         pomo_size = state.BATCH_IDX.size(1)
 
         if state.selected_count == 0:  # First Move, depot
-            selected = torch.zeros(size=(batch_size, pomo_size), dtype=torch.long).to(self.device)
-            prob = torch.ones(size=(batch_size, pomo_size))
+            selected = torch.zeros(size=(batch_size, pomo_size), dtype=torch.long, device=self.encoded_nodes.device)
+            prob = torch.ones(size=(batch_size, pomo_size), device=self.encoded_nodes.device)
             # probs = torch.ones(size=(batch_size, pomo_size, self.encoded_nodes.size(1)))
             # shape: (batch, pomo, problem_size+1)
 
@@ -70,14 +86,16 @@ class MOEModel(nn.Module):
         elif state.selected_count == 1:  # Second Move, POMO
             # selected = torch.arange(start=1, end=pomo_size+1)[None, :].expand(batch_size, -1).to(self.device)
             selected = state.START_NODE
-            prob = torch.ones(size=(batch_size, pomo_size))
+            prob = torch.ones(size=(batch_size, pomo_size), device=self.encoded_nodes.device)
             # probs = torch.ones(size=(batch_size, pomo_size, self.encoded_nodes.size(1)))
 
         else:
             encoded_last_node = _get_encoding(self.encoded_nodes, state.current_node)
             # shape: (batch, pomo, embedding)
-            attr = torch.cat((state.load[:, :, None], state.current_time[:, :, None], state.length[:, :, None], state.open[:, :, None]), dim=2)
-            # shape: (batch, pomo, 4)
+            attr = torch.cat((state.load[:, :, None], state.current_time[:, :, None], state.length[:, :, None], state.open[:, :, None],
+                              (state.total_distance / self.objective_scales[0])[:, :, None],
+                              (state.max_route_distance / self.objective_scales[1])[:, :, None]), dim=2)
+            # shape: (batch, pomo, 6)
             probs, moe_loss = self.decoder(encoded_last_node, attr, ninf_mask=state.ninf_mask)
             self.aux_loss += moe_loss
             # shape: (batch, pomo, problem+1)
@@ -87,8 +105,7 @@ class MOEModel(nn.Module):
                         try:
                             selected = probs.reshape(batch_size * pomo_size, -1).multinomial(1).squeeze(dim=1).reshape(batch_size, pomo_size)
                         except Exception as exception:
-                            print(">> Catch Exception: {}, on the instances of {}".format(exception, state.PROBLEM))
-                            exit(0)
+                            raise RuntimeError("Invalid action probabilities for {}".format(state.PROBLEM)) from exception
                     else:
                         selected = probs.argmax(dim=2)
                     prob = probs[state.BATCH_IDX, state.POMO_IDX, selected].reshape(batch_size, pomo_size)
@@ -249,96 +266,98 @@ class MTL_Decoder(nn.Module):
         embedding_dim = self.model_params['embedding_dim']
         head_num = self.model_params['head_num']
         qkv_dim = self.model_params['qkv_dim']
+        projection_dim = head_num * qkv_dim
+        self.num_output_experts = self.model_params['num_experts'] if (
+            self.model_params['num_experts'] > 1 and 'Dec' in self.model_params['expert_loc']) else 1
 
-        # self.Wq_1 = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-        # self.Wq_2 = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-        self.Wq_last = nn.Linear(embedding_dim + 4, head_num * qkv_dim, bias=False)
-        self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-        self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        # PMOCO parameter compression, with the paper's nonlinear 128-wide trunk.
+        self.hyper_fc1 = nn.Linear(2, 128)
+        self.hyper_fc2 = nn.Linear(128, 128)
+        self.hyper_fc3 = nn.Linear(128, 2 * (3 + self.num_output_experts))
+        self.hyper_Wq_last = nn.Linear(2, projection_dim * (embedding_dim + 6), bias=False)
+        self.hyper_Wk = nn.Linear(2, projection_dim * embedding_dim, bias=False)
+        self.hyper_Wv = nn.Linear(2, projection_dim * embedding_dim, bias=False)
+        self.hyper_multi_head_combine = nn.ModuleList([
+            nn.Linear(2, embedding_dim * projection_dim + embedding_dim, bias=False)
+            for _ in range(self.num_output_experts)])
 
-        # [Option 3]: Use MoEs in Decoder
-        if self.model_params['num_experts'] > 1 and 'Dec' in self.model_params['expert_loc']:
-            self.multi_head_combine = MoE(input_size=head_num * qkv_dim, output_size=embedding_dim, num_experts=self.model_params['num_experts'],
-                                          k=self.model_params['topk'], T=1.0, noisy_gating=True, routing_level=self.model_params['routing_level'],
-                                          routing_method=self.model_params['routing_method'], moe_model="Linear")
+        # Preserve MVMoE routing, using the generated affine experts.
+        if self.num_output_experts > 1:
+            self.multi_head_combine = MoE(input_size=projection_dim, output_size=embedding_dim,
+                                          num_experts=self.num_output_experts,
+                                          k=self.model_params['topk'], T=1.0, noisy_gating=True,
+                                          routing_level=self.model_params['routing_level'],
+                                          routing_method=self.model_params['routing_method'],
+                                          moe_model="Linear", external_parameters=True)
         else:
-            self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
+            self.multi_head_combine = None
 
-        self.k = None  # saved key, for multi-head attention
-        self.v = None  # saved value, for multi-head_attention
-        self.single_head_key = None  # saved, for single-head attention
-        # self.q1 = None  # saved q1, for multi-head attention
-        # self.q2 = None  # saved q2, for multi-head attention
+        self.Wq_last_para = None
+        self.Wk_para = None
+        self.Wv_para = None
+        self.expert_weights = None
+        self.expert_biases = None
+        self.k = None
+        self.v = None
+        self.single_head_key = None
+
+    def assign(self, pref):
+        pref = torch.as_tensor(pref, device=self.hyper_fc1.weight.device, dtype=self.hyper_fc1.weight.dtype)
+        if pref.shape != (2,) or not torch.isfinite(pref).all() or (pref < 0).any():
+            raise ValueError("A batch shares one finite nonnegative two-objective preference")
+        if not torch.isclose(pref.sum(), pref.new_tensor(1.)):
+            raise ValueError("Preference values must sum to one")
+        latent = self.hyper_fc3(F.relu(self.hyper_fc2(F.relu(self.hyper_fc1(pref)))))
+        groups = latent.reshape(3 + self.num_output_experts, 2)
+        embedding_dim = self.model_params['embedding_dim']
+        projection_dim = self.model_params['head_num'] * self.model_params['qkv_dim']
+        # F.linear weights always have [out_features, in_features] shape.
+        self.Wq_last_para = self.hyper_Wq_last(groups[0]).reshape(projection_dim, embedding_dim + 6)
+        self.Wk_para = self.hyper_Wk(groups[1]).reshape(projection_dim, embedding_dim)
+        self.Wv_para = self.hyper_Wv(groups[2]).reshape(projection_dim, embedding_dim)
+        expert_params = [head(groups[3 + i]) for i, head in enumerate(self.hyper_multi_head_combine)]
+        self.expert_weights = torch.stack([
+            x[:embedding_dim * projection_dim].reshape(embedding_dim, projection_dim) for x in expert_params])
+        self.expert_biases = torch.stack([x[embedding_dim * projection_dim:] for x in expert_params])
+        # A new preference invalidates cached keys and values from the preceding one.
+        self.k = self.v = self.single_head_key = None
 
     def set_kv(self, encoded_nodes):
         # encoded_nodes.shape: (batch, problem+1, embedding)
+        if self.Wq_last_para is None:
+            raise RuntimeError("Call model.assign(pref) before pre_forward/set_kv")
         head_num = self.model_params['head_num']
-
-        self.k = reshape_by_heads(self.Wk(encoded_nodes), head_num=head_num)
-        self.v = reshape_by_heads(self.Wv(encoded_nodes), head_num=head_num)
-        # shape: (batch, head_num, problem+1, qkv_dim)
+        self.k = reshape_by_heads(F.linear(encoded_nodes, self.Wk_para), head_num=head_num)
+        self.v = reshape_by_heads(F.linear(encoded_nodes, self.Wv_para), head_num=head_num)
         self.single_head_key = encoded_nodes.transpose(1, 2)
-        # shape: (batch, embedding, problem+1)
-
-    def set_q1(self, encoded_q1):
-        # encoded_q.shape: (batch, n, embedding)  # n can be 1 or pomo
-        head_num = self.model_params['head_num']
-        self.q1 = reshape_by_heads(self.Wq_1(encoded_q1), head_num=head_num)
-        # shape: (batch, head_num, n, qkv_dim)
-
-    def set_q2(self, encoded_q2):
-        # encoded_q.shape: (batch, n, embedding)  # n can be 1 or pomo
-        head_num = self.model_params['head_num']
-        self.q2 = reshape_by_heads(self.Wq_2(encoded_q2), head_num=head_num)
-        # shape: (batch, head_num, n, qkv_dim)
 
     def forward(self, encoded_last_node, attr, ninf_mask):
         # encoded_last_node.shape: (batch, pomo, embedding)
-        # attr.shape: (batch, pomo, 4)
-        # ninf_mask.shape: (batch, pomo, problem)
-
+        # attr.shape: (batch, pomo, 6)
+        # ninf_mask.shape: (batch, pomo, problem+1)
+        if self.k is None or self.v is None:
+            raise RuntimeError("Call pre_forward/set_kv after assigning the current preference")
         head_num, moe_loss = self.model_params['head_num'], 0
 
-        #  Multi-Head Attention
+        # Multi-Head Attention
         #######################################################
         input_cat = torch.cat((encoded_last_node, attr), dim=2)
-        # shape = (batch, group, EMBEDDING_DIM + 4)
-
-        q_last = reshape_by_heads(self.Wq_last(input_cat), head_num=head_num)
-        # shape: (batch, head_num, pomo, qkv_dim)
-
-        # q = self.q1 + self.q2 + q_last
-        # # shape: (batch, head_num, pomo, qkv_dim)
-        q = q_last
-        # shape: (batch, head_num, pomo, qkv_dim)
-
+        q = reshape_by_heads(F.linear(input_cat, self.Wq_last_para), head_num=head_num)
         out_concat = multi_head_attention(q, self.k, self.v, rank3_ninf_mask=ninf_mask)
-        # shape: (batch, pomo, head_num*qkv_dim)
 
         if isinstance(self.multi_head_combine, MoE):
-            mh_atten_out, moe_loss = self.multi_head_combine(out_concat)
+            mh_atten_out, moe_loss = self.multi_head_combine(
+                out_concat, expert_weights=self.expert_weights, expert_biases=self.expert_biases)
         else:
-            mh_atten_out = self.multi_head_combine(out_concat)
-        # shape: (batch, pomo, embedding)
+            mh_atten_out = F.linear(out_concat, self.expert_weights[0], self.expert_biases[0])
 
-        #  Single-Head Attention, for probability calculation
+        # Single-Head Attention, for probability calculation
         #######################################################
         score = torch.matmul(mh_atten_out, self.single_head_key)
-        # shape: (batch, pomo, problem)
-
-        sqrt_embedding_dim = self.model_params['sqrt_embedding_dim']
-        logit_clipping = self.model_params['logit_clipping']
-
-        score_scaled = score / sqrt_embedding_dim
-        # shape: (batch, pomo, problem)
-
-        score_clipped = logit_clipping * torch.tanh(score_scaled)
-
+        score_scaled = score / self.model_params['sqrt_embedding_dim']
+        score_clipped = self.model_params['logit_clipping'] * torch.tanh(score_scaled)
         score_masked = score_clipped + ninf_mask
-
         probs = F.softmax(score_masked, dim=2)
-        # shape: (batch, pomo, problem)
-
         return probs, moe_loss
 
 
